@@ -1,0 +1,17 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Large media outputs and downloads
+*.part
+*.wav
+*.mp4
+*.log
+
+# Dependency directories
+node_modules/
+
+# OS metadata
+.DS_Store
+Thumbs.db
