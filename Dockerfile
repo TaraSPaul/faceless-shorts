@@ -6,7 +6,7 @@
 # ────────────────────────────────────────────────────────────────────────────
 
 # ── Stage 1: builder ─────────────────────────────────────────────────────────
-FROM python:3.11-slim AS builder
+FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
 
 WORKDIR /build
 
@@ -20,7 +20,7 @@ RUN pip install --no-cache-dir --prefix=/deps -r requirements.txt
 
 
 # ── Stage 2: runtime image ────────────────────────────────────────────────────
-FROM python:3.11-slim
+FROM public.ecr.aws/docker/library/python:3.11-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
