@@ -38,11 +38,16 @@ def _generate_cut_queries(topic: str, lines: list) -> list[str]:
 Cuts:
 {cuts_summary}
 
-For each cut (0 to {len(lines)-1}), write ONE crisp 2-3 word English visual subject query that matches a concrete Wikipedia/Wikimedia Commons photograph (no abstract concepts, use real physical subjects!).
-Example for "Why Do Airplane Windows Have a Tiny Hole?":
-["Airplane window", "Commercial aircraft", "Aircraft cabin", "Acrylic glass", "Frost window", "Aircraft fuselage", "Airplane wing clouds", "Pilot cockpit"]
+CRITICAL RULES FOR SEARCH QUERIES:
+1. Every query MUST be explicitly grounded in the physical domain of "{topic}" (e.g., if the topic is about airplane windows, EVERY query must mention aircraft/airplane/aviation/cabin/sky; if about car tires/doors, EVERY query must mention car/automobile/tire/wheel/engine).
+2. NEVER write generic or abstract phrases like "Small hole", "Pressure balance", "Pressure imbalance", "Hook question", or "Call to action" — Wikipedia will return black holes or biology diagrams!
+3. Use 2–3 word concrete English Wikipedia article titles / photo subjects that are distinct across cuts.
+   Example for "Why Do Airplane Windows Have a Tiny Hole?":
+   ["Aircraft cabin window", "Commercial airliner sky", "Aircraft cabin seats", "Poly(methyl methacrylate)", "Cockpit instruments", "Aircraft wing clouds", "Boeing 787 window", "Commercial aviation sunset"]
+   Example for "Why Do Luxury Cars Have Soft-Close Doors?":
+   ["Luxury car exterior", "Car door handle", "Electric motor actuator", "Automobile assembly", "Luxury car interior", "Car dashboard night", "Sports sedan parked"]
 
-Return ONLY a JSON array of {len(lines)} short English search queries (no markdown fences)."""
+Return ONLY a JSON array of {len(lines)} concrete, domain-anchored English search queries (no markdown fences)."""
 
     try:
         br = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
