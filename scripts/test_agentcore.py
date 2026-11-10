@@ -9,6 +9,9 @@ import sys
 import boto3
 from botocore.config import Config
 
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 def main():
     if len(sys.argv) < 2:
         print("Usage: python scripts/test_agentcore.py <runtime_arn> [topic]")

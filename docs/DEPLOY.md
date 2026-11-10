@@ -60,6 +60,14 @@ docker buildx build `
   --push .
 ```
 
+### Option C: AWS CodeBuild (Native Graviton ARM64)
+Uses the provisioned CodeBuild project `faceless-shorts-arm64-builder` with `buildspec.yml`:
+```powershell
+git archive --format=zip --output=$env:TEMP\faceless-shorts-src.zip HEAD
+aws s3 cp $env:TEMP\faceless-shorts-src.zip s3://bedrock-agentcore-runtime-970817257663-us-east-1-2fikaiw53p/codebuild/source.zip
+aws codebuild start-build --project-name faceless-shorts-arm64-builder --region us-east-1
+```
+
 Verify the image in ECR:
 ```powershell
 aws ecr describe-images `
@@ -69,12 +77,15 @@ aws ecr describe-images `
 
 ---
 
-## Step 2 — IAM Execution Role
+## Step 2 — IAM Execution Role & Live Runtime
 
-The role has already been provisioned:
+The IAM execution role and Bedrock AgentCore Runtime are provisioned in `us-east-1`:
 - **Role Name**: `faceless-shorts-agent-role`
 - **Role ARN**: `arn:aws:iam::970817257663:role/faceless-shorts-agent-role`
-- **Attached Policies**: `AmazonS3FullAccess`, `CloudWatchLogsFullAccess`
+- **Attached Policies**: `AmazonS3FullAccess`, `CloudWatchLogsFullAccess`, `AmazonEC2ContainerRegistryReadOnly`, `AWSXrayWriteOnlyAccess`, and inline `BedrockAgentCoreWorkloadPolicy`
+- **Runtime Name**: `faceless_shorts_agent`
+- **Runtime ID**: `faceless_shorts_agent-G1o0APB8y8`
+- **Runtime ARN**: `arn:aws:bedrock-agentcore:us-east-1:970817257663:runtime/faceless_shorts_agent-G1o0APB8y8`
 
 ---
 
@@ -102,4 +113,9 @@ Send a `POST` request to `/invocations`:
   "voice": "elevenlabs:EXAVITQu4vr4xnSDxMaL",
   "lang": "hi"
 }
+```
+
+Test via `boto3` from PowerShell:
+```powershell
+python scripts/test_agentcore.py "arn:aws:bedrock-agentcore:us-east-1:970817257663:runtime/faceless_shorts_agent-G1o0APB8y8" "Why Do New Car Tires Have Tiny Rubber Hairs?"
 ```
