@@ -22,16 +22,50 @@ FILES = {
     'voices-v1.0.bin': 'https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0/voices-v1.0.bin',
 }
 GOOD = {
-    'hf_beta': 'Hindi female, age 21, bright, expressive, conversational (default for Hindi)',
-    'hf_alpha': 'Hindi female, age 21, warm, clear, calm',
-    'hm_omega': 'Hindi male, expressive narrator',
-    'hm_psi': 'Hindi male, deep explainer',
+    'hi-IN-SwaraNeural': 'Hindi female, hyperrealistic Microsoft Azure Neural, warm & expressive (Free, No Key)',
+    'en-US-AvaNeural': 'US female, hyperrealistic Microsoft Azure Neural, conversational & dynamic (Free, No Key)',
+    'en-US-JennyNeural': 'US female, crisp, friendly Microsoft Azure Neural (Free, No Key)',
+    'hf_beta': 'Hindi female, age 21, bright, expressive, conversational (Kokoro-82M local default)',
+    'hf_alpha': 'Hindi female, age 21, warm, clear, calm (Kokoro-82M)',
+    'hm_omega': 'Hindi male, expressive narrator (Kokoro-82M)',
+    'hm_psi': 'Hindi male, deep explainer (Kokoro-82M)',
     'am_michael': 'US male, steady explainer', 'am_puck': 'US male, lively, playful', 'am_fenrir': 'US male, deeper',
     'am_onyx': 'US male, low', 'af_heart': 'US female, warm (best overall)', 'af_bella': 'US female, age 25, bright and conversational (default English)',
     'af_nicole': 'US female, soft and close', 'bm_george': 'UK male, documentary', 'bm_fable': 'UK male, storyteller',
     'bf_emma': 'UK female, calm',
 }
 SR = 24000
+
+
+def synth_edge_tts(text, voice, speed=1.0):
+    import asyncio, subprocess, edge_tts
+    rate_str = f"+{int((speed - 1.0) * 100)}%" if speed >= 1.0 else f"-{int((1.0 - speed) * 100)}%"
+    async def _run():
+        comm = edge_tts.Communicate(text, voice, rate=rate_str)
+        return b''.join([chunk['data'] async for chunk in comm.stream() if chunk['type'] == 'audio'])
+    mp3_data = asyncio.run(_run())
+    cmd = ['ffmpeg', '-y', '-f', 'mp3', '-i', 'pipe:0', '-f', 's16le', '-ar', str(SR), '-ac', '1', 'pipe:1']
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out, _ = p.communicate(input=mp3_data)
+    return np.frombuffer(out, dtype=np.int16).astype(np.float64) / 32768.0
+
+
+def synth_elevenlabs(text, voice_id, api_key):
+    import subprocess, requests
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
+    headers = {"xi-api-key": api_key, "Content-Type": "application/json"}
+    payload = {
+        "text": text,
+        "model_id": "eleven_multilingual_v2",
+        "voice_settings": {"stability": 0.45, "similarity_boost": 0.85, "style": 0.20, "use_speaker_boost": True}
+    }
+    r = requests.post(url, json=payload, headers=headers)
+    if r.status_code != 200:
+        raise RuntimeError(f"ElevenLabs error ({r.status_code}): {r.text}")
+    cmd = ['ffmpeg', '-y', '-f', 'mp3', '-i', 'pipe:0', '-f', 's16le', '-ar', str(SR), '-ac', '1', 'pipe:1']
+    p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    out, _ = p.communicate(input=r.content)
+    return np.frombuffer(out, dtype=np.int16).astype(np.float64) / 32768.0
 
 
 def ensure_models():
@@ -71,15 +105,29 @@ def main():
     if a.list:
         for k, v in GOOD.items(): print(f'{k:12s} {v}')
         return
-    ensure_models()
-    if a.download: return
     if not a.project: ap.error('project folder missing')
-    from kokoro_onnx import Kokoro
     P = Path(a.project); S = json.loads((P / 'script.json').read_text(encoding='utf-8'))
-    voice = a.voice or S.get('voice', 'hf_beta'); speed = a.speed or S.get('speed', 1.0)
-    k = Kokoro(str(KDIR / 'kokoro-v1.0.onnx'), str(KDIR / 'voices-v1.0.bin'))
-    lang = a.lang or S.get('lang') or ('hi' if voice.startswith('h') else ('en-gb' if voice.startswith('b') else 'en-us'))
-    say = lambda text: trim(np.asarray(k.create(text, voice=voice, speed=speed, lang=lang)[0], dtype=np.float64))
+    voice = a.voice or S.get('voice', 'hi-IN-SwaraNeural'); speed = a.speed or S.get('speed', 1.0)
+    engine = S.get('engine', 'edge' if voice.endswith('Neural') else ('elevenlabs' if voice.startswith('elevenlabs:') else 'kokoro'))
+    el_key = os.environ.get('ELEVENLABS_API_KEY')
+
+    if engine == 'elevenlabs' or voice.startswith('elevenlabs:'):
+        if not el_key:
+            raise RuntimeError("ELEVENLABS_API_KEY environment variable is not set. Please set it or use an edge-tts voice like 'hi-IN-SwaraNeural'.")
+        voice_id = voice.split(':', 1)[1] if ':' in voice else 'EXAVITQu4vr4xnSDxMaL'
+        print(f"Using ElevenLabs hyperrealistic voice: {voice_id}", flush=True)
+        say = lambda text: trim(synth_elevenlabs(text, voice_id, el_key))
+        lang = a.lang or S.get('lang', 'hi')
+    elif engine == 'edge' or voice.endswith('Neural'):
+        print(f"Using Microsoft Azure Neural voice (Edge-TTS): {voice} ({speed}x)", flush=True)
+        say = lambda text: trim(synth_edge_tts(text, voice, speed))
+        lang = a.lang or S.get('lang', 'hi' if 'hi-' in voice else 'en-us')
+    else:
+        ensure_models()
+        from kokoro_onnx import Kokoro
+        k = Kokoro(str(KDIR / 'kokoro-v1.0.onnx'), str(KDIR / 'voices-v1.0.bin'))
+        lang = a.lang or S.get('lang') or ('hi' if voice.startswith('h') else ('en-gb' if voice.startswith('b') else 'en-us'))
+        say = lambda text: trim(np.asarray(k.create(text, voice=voice, speed=speed, lang=lang)[0], dtype=np.float64))
     # group the lines into whole sentences (a line ending in . ? ! । closes one; "break": true forces a close)
     groups, cur = [], []
     for i, ln in enumerate(S['lines']):
