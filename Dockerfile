@@ -42,6 +42,9 @@ RUN groupadd --gid 1001 appgroup \
 
 WORKDIR /app
 
+# Install native fast Canvas renderer (@napi-rs/canvas ARM64 prebuilt)
+RUN npm install --prefix /app --no-save @napi-rs/canvas
+
 # Copy application code, styles, and scripts
 COPY src/ ./src/
 COPY styles/ ./styles/
