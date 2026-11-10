@@ -32,22 +32,19 @@ def _generate_cut_queries(topic: str, lines: list) -> list[str]:
         f"Cut {i}: {ln.get('text', '')!r} (badge: {ln.get('caps', '')!r})"
         for i, ln in enumerate(lines)
     )
-    prompt = f"""You are a video editor sourcing a DIFFERENT real photograph for EVERY cut of a vertical explainer short about:
+    prompt = f"""You are a Wikipedia researcher choosing {len(lines)} DIFFERENT real English Wikipedia encyclopedia article titles to fetch photographs for a video about:
 "{topic}"
 
 Cuts:
 {cuts_summary}
 
-CRITICAL RULES FOR SEARCH QUERIES:
-1. Every query MUST be explicitly grounded in the physical domain of "{topic}" (e.g., if the topic is about airplane windows, EVERY query must mention aircraft/airplane/aviation/cabin/sky; if about car tires/doors, EVERY query must mention car/automobile/tire/wheel/engine).
-2. NEVER write generic or abstract phrases like "Small hole", "Pressure balance", "Pressure imbalance", "Hook question", or "Call to action" — Wikipedia will return black holes or biology diagrams!
-3. Use 2–3 word concrete English Wikipedia article titles / photo subjects that are distinct across cuts.
-   Example for "Why Do Airplane Windows Have a Tiny Hole?":
-   ["Aircraft cabin window", "Commercial airliner sky", "Aircraft cabin seats", "Poly(methyl methacrylate)", "Cockpit instruments", "Aircraft wing clouds", "Boeing 787 window", "Commercial aviation sunset"]
-   Example for "Why Do Luxury Cars Have Soft-Close Doors?":
-   ["Luxury car exterior", "Car door handle", "Electric motor actuator", "Automobile assembly", "Luxury car interior", "Car dashboard night", "Sports sedan parked"]
+STRICT RULES:
+1. Every item MUST be a REAL, specific Wikipedia article subject belonging directly to the topic's industry/domain (e.g. aviation/cars/biology/physics) so Wikipedia returns an exact on-topic photograph.
+2. NEVER invent abstract phrases like "Window balance", "Aviation curiosity", "Passenger perspective", "Small hole", or "Hook question".
+3. NEVER use generic single words like "Window" or "Door" (which return house architecture photos!) — always specify the subject (e.g. "Boeing 787 Dreamliner", "Aircraft cabin", "Airliner", "Pressurized cabin", "Jet engine", "Flight deck", "Fuselage", "Wing", "Contrail").
+4. Make every entry a DIFFERENT Wikipedia subject so all {len(lines)} cuts have varied, visually rich scenes!
 
-Return ONLY a JSON array of {len(lines)} concrete, domain-anchored English search queries (no markdown fences)."""
+Return ONLY a JSON array of {len(lines)} real English Wikipedia article titles (no markdown fences)."""
 
     try:
         br = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
@@ -111,25 +108,26 @@ def _fetch_episodic_images(topic: str, lines: list, project_dir: Path) -> int:
         except Exception:
             pass
 
-        try:
-            r2 = session.get("https://commons.wikimedia.org/w/api.php", params={
-                "action": "query",
-                "generator": "search",
-                "gsrsearch": f"{q} filetype:bitmap",
-                "gsrnamespace": "6",
-                "gsrlimit": 6,
-                "prop": "imageinfo",
-                "iiprop": "url|mime",
-                "iiurlwidth": "1080",
-                "format": "json"
-            }, timeout=8).json()
-            for p in r2.get("query", {}).get("pages", {}).values():
-                info = (p.get("imageinfo") or [{}])[0]
-                src = info.get("thumburl") or info.get("url", "")
-                if info.get("mime") in ("image/jpeg", "image/png") and src:
-                    urls.append(src)
-        except Exception:
-            pass
+        if not urls:
+            try:
+                r2 = session.get("https://commons.wikimedia.org/w/api.php", params={
+                    "action": "query",
+                    "generator": "search",
+                    "gsrsearch": f"{q} filetype:bitmap",
+                    "gsrnamespace": "6",
+                    "gsrlimit": 6,
+                    "prop": "imageinfo",
+                    "iiprop": "url|mime",
+                    "iiurlwidth": "1080",
+                    "format": "json"
+                }, timeout=8).json()
+                for p in r2.get("query", {}).get("pages", {}).values():
+                    info = (p.get("imageinfo") or [{}])[0]
+                    src = info.get("thumburl") or info.get("url", "")
+                    if info.get("mime") in ("image/jpeg", "image/png") and src:
+                        urls.append(src)
+            except Exception:
+                pass
         return urls
 
     with ThreadPoolExecutor(max_workers=8) as ex:
