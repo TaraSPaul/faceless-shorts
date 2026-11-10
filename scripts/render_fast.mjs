@@ -1,7 +1,7 @@
 /**
  * render_fast.mjs — Native Rust/Skia Canvas 2D + raw RGBA FFmpeg renderer (no Chromium needed).
  *
- * Usage (run from project folder or pass project dir via --root):
+ * Usage:
  *   node /app/scripts/render_fast.mjs cues [project_dir]
  *   node /app/scripts/render_fast.mjs video renders/out.mp4 [project_dir]
  */
@@ -49,22 +49,43 @@ if (fs.existsSync(fontPath)) {
   GlobalFonts.registerFromPath(fontPath, 'Inter');
 }
 
-// Preload and pre-rasterize episodic SVG illustrations (data/illus_*.svg)
-const illusDir = path.join(ROOT, 'data');
+// Preload and pre-rasterize episodic images (data/bg_*.jpg|png and data/illus_*.svg)
+const dataDir = path.join(ROOT, 'data');
 const illusList = [];
-if (fs.existsSync(illusDir)) {
-  const files = fs
-    .readdirSync(illusDir)
+const bgList = [];
+
+if (fs.existsSync(dataDir)) {
+  const files = fs.readdirSync(dataDir);
+
+  const bgFiles = files
+    .filter((f) => /^bg_\d+\.(jpg|jpeg|png|webp)$/i.test(f))
+    .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
+
+  for (const f of bgFiles) {
+    try {
+      const img = await loadImage(fs.readFileSync(path.join(dataDir, f)));
+      const maxDim = 1280;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      const tw = Math.max(1, Math.round(img.width * scale));
+      const th = Math.max(1, Math.round(img.height * scale));
+      const off = createCanvas(tw, th);
+      off.getContext('2d').drawImage(img, 0, 0, tw, th);
+      bgList.push(off);
+    } catch (err) {
+      console.error(`Warning: failed to load ${f}: ${err.message}`);
+      bgList.push(null);
+    }
+  }
+
+  const svgFiles = files
     .filter((f) => /^illus_\d+\.svg$/i.test(f))
     .sort((a, b) => parseInt(a.match(/\d+/)[0], 10) - parseInt(b.match(/\d+/)[0], 10));
-  for (const f of files) {
+
+  for (const f of svgFiles) {
     try {
-      const svgBuf = fs.readFileSync(path.join(illusDir, f));
-      const img = await loadImage(svgBuf);
-      // Pre-rasterize onto offscreen canvas once so per-frame drawImage is a fast pixel blit
+      const img = await loadImage(fs.readFileSync(path.join(dataDir, f)));
       const off = createCanvas(840, 640);
-      const octx = off.getContext('2d');
-      octx.drawImage(img, 0, 0, 840, 640);
+      off.getContext('2d').drawImage(img, 0, 0, 840, 640);
       illusList.push(off);
     } catch (err) {
       console.error(`Warning: failed to load ${f}: ${err.message}`);
@@ -72,6 +93,7 @@ if (fs.existsSync(illusDir)) {
     }
   }
 }
+globalThis.__FAC_BGS__ = bgList;
 globalThis.__FAC_ILLUS__ = illusList;
 
 const importSrc = (rel) => import(pathToFileURL(path.join(ROOT, rel)).href);
@@ -101,7 +123,7 @@ function drawFrame(t) {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.globalAlpha = 1;
   ctx.letterSpacing = '0px';
-  ctx.fillStyle = '#000';
+  ctx.fillStyle = '#070B14';
   ctx.fillRect(0, 0, W, H);
 
   let i = shots.length - 1;
@@ -111,9 +133,9 @@ function drawFrame(t) {
   const d = end - sh.at;
   const lt = t - sh.at;
 
-  const punch = 1 + 0.13 * (1 - eo(clamp(lt / 0.32)));
-  const drift = 1 + (sh.zoom ?? 0.06) * eio(clamp(lt / d));
-  const [cx, cy] = sh.cam || [540, 900];
+  const punch = 1 + 0.08 * (1 - eo(clamp(lt / 0.28)));
+  const drift = 1 + (sh.zoom ?? 0.04) * eio(clamp(lt / d));
+  const [cx, cy] = sh.cam || [540, 620];
 
   ctx.save();
   ctx.translate(cx, cy);
@@ -126,12 +148,12 @@ function drawFrame(t) {
   ctx.letterSpacing = '0px';
   if (i > 0 && lt < 0.12) {
     ctx.fillStyle = '#FFFFFF';
-    ctx.globalAlpha = 0.55 * (1 - lt / 0.12);
+    ctx.globalAlpha = 0.45 * (1 - lt / 0.12);
     ctx.fillRect(0, 0, W, H);
     ctx.globalAlpha = 1;
   }
 
-  const fade = Math.min(clamp(t / 0.25), clamp((T.dur - t) / 0.35));
+  const fade = Math.min(clamp(t / 0.22), clamp((T.dur - t) / 0.32));
   if (fade < 1) {
     ctx.fillStyle = '#000';
     ctx.globalAlpha = 1 - fade;

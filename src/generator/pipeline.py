@@ -1,6 +1,7 @@
 """
 generator/pipeline.py — Video generation pipeline orchestrator.
 """
+from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 from pathlib import Path
 import boto3
+import requests
 from core import config, s3
 
 logger = logging.getLogger(__name__)
@@ -18,85 +20,195 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 STYLES_DIR = BASE_DIR / "styles"
 SCRIPTS_DIR = BASE_DIR / "scripts"
 WORKSPACE_DIR = Path(os.environ.get("SHORTS_WORKSPACE", "/tmp/shorts" if os.name != 'nt' else "C:/tmp/shorts"))
-SCENE_MODEL_ID = os.environ.get("SCENE_MODEL_ID", "us.amazon.nova-lite-v1:0")
+SCENE_MODEL_ID = os.environ.get("SCENE_MODEL_ID", "us.amazon.nova-pro-v1:0")
 
 
-def _generate_episodic_svgs(topic: str, lines: list, project_dir: Path) -> list[str]:
-    """Generate a unique flat-vector SVG illustration per script cut via Amazon Bedrock."""
-    data_dir = project_dir / "data"
-    data_dir.mkdir(parents=True, exist_ok=True)
+def _generate_cut_queries(topic: str, lines: list) -> list[str]:
+    """Use Amazon Bedrock to choose specific, concrete Wikipedia/Wikimedia visual search queries per cut."""
     if not lines:
-        return []
+        return [topic]
 
     cuts_summary = "\n".join(
-        f"Cut {i}: spoken={ln.get('text', '')!r}, headline={ln.get('caps', '')!r}"
+        f"Cut {i}: {ln.get('text', '')!r} (badge: {ln.get('caps', '')!r})"
         for i, ln in enumerate(lines)
     )
-    prompt = f"""You are a motion graphics art director creating unique episodic vector illustrations for each scene cut of a vertical YouTube Short about: "{topic}".
+    prompt = f"""You are a video editor sourcing a DIFFERENT real photograph for EVERY cut of a vertical explainer short about:
+"{topic}"
 
-Here are the {len(lines)} cuts:
+Cuts:
 {cuts_summary}
 
-Generate exactly {len(lines)} DISTINCT flat-vector SVG illustrations (one for each cut, visually showing what happens in THAT specific cut — do NOT repeat the same object across cuts).
-Strict SVG rules:
-- Each item must be a valid SVG string starting with `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 320">` and ending with `</svg>`.
-- Draw crisp, recognizable multi-part scenes using geometric primitives (<rect>, <circle>, <ellipse>, <polygon>, <path>, <line>) with rich contrasting colors (#0F172A, #1E293B, #334155, #38BDF8, #FACC15, #F43F5E, #22C55E, #FFFFFF, #CBD5E1).
-- NEVER use <text>, <style>, <script>, <image>, or external URLs.
-- Keep main artwork centered well inside x=40..380, y=30..290.
+For each cut (0 to {len(lines)-1}), write ONE crisp 2-3 word English visual subject query that matches a concrete Wikipedia/Wikimedia Commons photograph (no abstract concepts, use real physical subjects!).
+Example for "Why Do Airplane Windows Have a Tiny Hole?":
+["Airplane window", "Commercial aircraft", "Aircraft cabin", "Acrylic glass", "Frost window", "Aircraft fuselage", "Airplane wing clouds", "Pilot cockpit"]
 
-Return ONLY a JSON array of {len(lines)} SVG strings (no markdown fences)."""
+Return ONLY a JSON array of {len(lines)} short English search queries (no markdown fences)."""
 
-    svgs = []
     try:
         br = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
         resp = br.converse(
             modelId=SCENE_MODEL_ID,
             messages=[{"role": "user", "content": [{"text": prompt}]}],
-            inferenceConfig={"maxTokens": 4096, "temperature": 0.65},
+            inferenceConfig={"maxTokens": 600, "temperature": 0.4},
         )
         raw = resp["output"]["message"]["content"][0]["text"].strip()
         raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
-        # Extract JSON array cleanly if any prose wraps it
         m = re.search(r"\[.*\]", raw, re.DOTALL)
         if m:
             raw = m.group(0)
         parsed = json.loads(raw)
-        if isinstance(parsed, list):
-            for idx, item in enumerate(parsed[:len(lines)]):
-                if isinstance(item, str) and "<svg" in item and "</svg>" in item:
-                    svg_clean = item[item.index("<svg"):item.rindex("</svg>") + 6]
-                    (data_dir / f"illus_{idx}.svg").write_text(svg_clean, encoding="utf-8")
-                    svgs.append(svg_clean)
-        logger.info(f"Generated {len(svgs)}/{len(lines)} episodic SVG scenes via Bedrock ({SCENE_MODEL_ID}).")
+        if isinstance(parsed, list) and parsed:
+            queries = [str(q).strip() or topic for q in parsed[:len(lines)]]
+            while len(queries) < len(lines):
+                queries.append(topic)
+            return queries
     except Exception as exc:
-        logger.warning(f"Bedrock episodic SVG generation skipped/partial ({exc}); using procedural shapes fallback.")
-    return svgs
+        logger.warning(f"Bedrock query generation failed ({exc}); deriving keyword queries.")
+
+    # Keyword fallback per cut
+    out = []
+    for ln in lines:
+        words = re.findall(r"[A-Za-z]{3,}", (ln.get("caps") or "") + " " + topic)
+        out.append(" ".join(words[:3]) if words else topic)
+    return out
+
+
+def _fetch_episodic_images(topic: str, lines: list, project_dir: Path) -> int:
+    """Fetch a distinct high-resolution photo for every cut via Wikipedia & Wikimedia Commons."""
+    data_dir = project_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    if not lines:
+        return 0
+
+    queries = _generate_cut_queries(topic, lines)
+    logger.info(f"Episodic visual queries: {queries}")
+
+    session = requests.Session()
+    session.headers.update({"User-Agent": "FacelessShortsStudio/1.0 (https://github.com/TaraSPaul/faceless-shorts)"})
+
+    def search_candidates(q: str) -> list[str]:
+        urls = []
+        try:
+            r = session.get("https://en.wikipedia.org/w/api.php", params={
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": q,
+                "gsrlimit": 6,
+                "prop": "pageimages",
+                "piprop": "thumbnail",
+                "pithumbsize": 1080,
+                "format": "json"
+            }, timeout=8).json()
+            for p in sorted(r.get("query", {}).get("pages", {}).values(), key=lambda x: x.get("index", 99)):
+                src = p.get("thumbnail", {}).get("source", "")
+                if src and not src.lower().endswith((".svg", ".gif")):
+                    urls.append(src)
+        except Exception:
+            pass
+
+        try:
+            r2 = session.get("https://commons.wikimedia.org/w/api.php", params={
+                "action": "query",
+                "generator": "search",
+                "gsrsearch": f"{q} filetype:bitmap",
+                "gsrnamespace": "6",
+                "gsrlimit": 6,
+                "prop": "imageinfo",
+                "iiprop": "url|mime",
+                "iiurlwidth": "1080",
+                "format": "json"
+            }, timeout=8).json()
+            for p in r2.get("query", {}).get("pages", {}).values():
+                info = (p.get("imageinfo") or [{}])[0]
+                src = info.get("thumburl") or info.get("url", "")
+                if info.get("mime") in ("image/jpeg", "image/png") and src:
+                    urls.append(src)
+        except Exception:
+            pass
+        return urls
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        all_candidates = list(ex.map(search_candidates, queries))
+
+    # Also grab fallback pool from the main topic
+    topic_pool = search_candidates(topic)
+
+    # Assign a unique image URL per cut so cuts don't repeat photos
+    used_urls = set()
+    chosen = []
+    for idx, cands in enumerate(all_candidates):
+        pick = None
+        for u in cands + topic_pool:
+            if u not in used_urls:
+                pick = u
+                used_urls.add(u)
+                break
+        if not pick and cands:
+            pick = cands[0]
+        elif not pick and topic_pool:
+            pick = topic_pool[idx % len(topic_pool)]
+        chosen.append((idx, pick))
+
+    def download_one(item):
+        idx, url = item
+        if not url:
+            return False
+        try:
+            r = session.get(url, timeout=10)
+            if r.status_code == 200 and len(r.content) > 8000:
+                ext = "png" if "png" in r.headers.get("Content-Type", "").lower() else "jpg"
+                (data_dir / f"bg_{idx}.{ext}").write_bytes(r.content)
+                return True
+        except Exception:
+            pass
+        return False
+
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        results = list(ex.map(download_one, chosen))
+
+    count = sum(1 for ok in results if ok)
+    logger.info(f"Downloaded {count}/{len(lines)} unique episodic photos.")
+    return count
 
 
 def _build_default_shots_js(topic: str, lines: list) -> str:
-    """Generate a safe-zone compliant, episodic shots.js displaying each cut's SVG illustration."""
+    """Generate dynamic Ken Burns + animated HUD overlay shots.js using unique episodic visuals."""
     badges = []
     for i, ln in enumerate(lines):
         caps = (ln.get("caps") or "").replace("*", "").split("|")[0].strip()
-        label = (caps or topic)[:22].replace("'", "\\'").replace('"', '\\"')
+        label = (caps or topic)[:26].replace("'", "\\'").replace('"', '\\"')
         badges.append(label)
 
     badges_js = json.dumps(badges, ensure_ascii=False)
-    topic_esc = topic[:28].replace('"', '\\"')
+    topic_esc = topic[:32].replace('"', '\\"')
 
-    return f"""// Auto-generated episodic safe-zone shots.js
+    return f"""// Dynamic episodic motion graphics + Ken Burns photography shots.js
 import {{ ctx, C, W, H, clamp, lerp, seg, eo, eio, eob, rnd, bigText, rr, circle, line }} from './core/lib.js';
 import {{ L, Le, T }} from './core/timing.js';
 import * as K from './core/kit.js';
 
 const BADGES = {badges_js};
 
+function drawCover(img, cx, cy, boxW, boxH, zoom, panX, panY) {{
+  const arImg = img.width / img.height;
+  const arBox = boxW / boxH;
+  let dw, dh;
+  if (arImg > arBox) {{
+    dh = boxH * zoom;
+    dw = dh * arImg;
+  }} else {{
+    dw = boxW * zoom;
+    dh = dw / arImg;
+  }}
+  ctx.drawImage(img, cx - dw / 2 + panX, cy - dh / 2 + panY, dw, dh);
+}}
+
 export function buildShots() {{
   const S = [], CUES = [];
   const add = (o) => (S.push(o), o);
   const cue = (t, type, o = {{}}) => CUES.push({{ t: +t.toFixed(3), type, ...o }});
   const cut = (i) => (i === 0 ? 0 : L(i) - 0.08);
-  const ILLUS = globalThis.__FAC_ILLUS__ || [];
+  const BGS = globalThis.__FAC_BGS__ || [];
 
   const count = T.lines.length;
   for (let i = 0; i < count; i++) {{
@@ -104,72 +216,114 @@ export function buildShots() {{
     const badge = BADGES[i] || "{topic_esc}";
     const isAlt = i % 2 === 1;
     const isLast = i === count - 1;
+    const motionMode = i % 4;
 
     add({{
       id: 'S' + String(i + 1).padStart(2, '0'),
       at: st,
-      cam: [540, 620],
-      zoom: 0.03 + 0.015 * (i % 3),
-      note: 'Episodic scene ' + i + ': ' + badge,
+      cam: [540, 560],
+      zoom: 0.025,
+      note: 'Episodic dynamic scene ' + i + ': ' + badge,
       draw(lt, d, t) {{
-        if (isAlt) {{
-          K.xray(t);
-        }} else {{
-          K.room();
-        }}
+        const p = clamp(lt / Math.max(0.5, d));
 
-        const pop = eob(seg(lt, 0.05, 0.35));
-        const bob = Math.sin(lt * 2.4 + i * 1.1) * 9;
+        // 1. Deep dark studio backdrop
+        ctx.fillStyle = '#070B14';
+        ctx.fillRect(-200, -200, W + 400, H + 400);
 
-        // 1. Top cut headline pill (y = 215..305)
-        ctx.save();
-        ctx.translate(540, 260);
-        ctx.scale(pop, pop);
-        ctx.fillStyle = isLast ? C.red : (isAlt ? C.navy : C.white);
-        ctx.strokeStyle = isAlt ? C.cyan : C.ink;
-        ctx.lineWidth = 7;
-        rr(-350, -45, 700, 90, 26);
-        ctx.fill();
-        ctx.stroke();
-        bigText(badge.toUpperCase(), 0, 2, 36, isLast ? C.white : (isAlt ? C.yellow : C.navy), 0, 1);
-        ctx.restore();
+        const bg = BGS[i] || BGS.find(Boolean);
+        if (bg) {{
+          // Alternating Ken Burns camera choreography per cut
+          let zoom = 1.08;
+          let panX = 0;
+          let panY = 0;
+          if (motionMode === 0) {{
+            zoom = lerp(1.02, 1.18, eio(p));
+            panY = lerp(25, -25, p);
+          }} else if (motionMode === 1) {{
+            zoom = lerp(1.18, 1.04, eio(p));
+            panX = lerp(-45, 45, p);
+          }} else if (motionMode === 2) {{
+            zoom = lerp(1.05, 1.16, eio(p));
+            panX = lerp(45, -45, p);
+          }} else {{
+            zoom = lerp(1.15, 1.02, eio(p));
+            panY = lerp(-30, 30, p);
+          }}
 
-        // 2. Main Episodic Illustration Stage Card (y = 330..870)
-        ctx.save();
-        ctx.translate(500, 600 + bob);
-        ctx.scale(pop, pop);
-
-        ctx.fillStyle = isAlt ? '#0F172A' : '#FFFFFF';
-        ctx.strokeStyle = isAlt ? C.cyan : C.ink;
-        ctx.lineWidth = 8;
-        rr(-360, -250, 720, 500, 36);
-        ctx.fill();
-        ctx.stroke();
-
-        const ill = ILLUS[i] || ILLUS[i % Math.max(1, ILLUS.length)];
-        if (ill) {{
-          const pulse = 1 + 0.035 * Math.sin(lt * 3.0);
+          // Rounded full-width cinematic viewport (y = 140 .. 1010, completely clear of captions)
           ctx.save();
-          ctx.scale(pulse, pulse);
-          ctx.drawImage(ill, -330, -225, 660, 450);
+          rr(48, 160, 984, 830, 38);
+          ctx.clip();
+          drawCover(bg, 540, 575, 984, 830, zoom, panX, panY);
+
+          // Cinematic top/bottom vignette inside card
+          const grad = ctx.createLinearGradient(0, 160, 0, 990);
+          grad.addColorStop(0, 'rgba(7, 11, 20, 0.55)');
+          grad.addColorStop(0.25, 'rgba(7, 11, 20, 0.0)');
+          grad.addColorStop(0.75, 'rgba(7, 11, 20, 0.05)');
+          grad.addColorStop(1, 'rgba(7, 11, 20, 0.72)');
+          ctx.fillStyle = grad;
+          ctx.fillRect(48, 160, 984, 830);
+          ctx.restore();
+
+          // Glowing outer border around viewport
+          ctx.strokeStyle = isLast ? '#FACC15' : (isAlt ? '#38BDF8' : '#FFFFFF');
+          ctx.lineWidth = 6;
+          rr(48, 160, 984, 830, 38);
+          ctx.stroke();
+
+          // Dynamic pulsing focus reticle highlighting focal zone
+          const rx = 540 + Math.sin(lt * 1.4 + i) * 140;
+          const ry = 560 + Math.cos(lt * 1.1 + i) * 70;
+          const pr = 56 + Math.sin(lt * 6) * 8;
+          ctx.save();
+          ctx.strokeStyle = isAlt ? 'rgba(56, 189, 248, 0.7)' : 'rgba(250, 204, 21, 0.75)';
+          ctx.lineWidth = 5;
+          ctx.beginPath();
+          ctx.arc(rx, ry, pr, 0, Math.PI * 2);
+          ctx.stroke();
           ctx.restore();
         }} else {{
-          // Procedural fallback shapes varied per cut index
-          const phase = lt * 2.5 + i;
-          circle(0, 0, 140 + Math.sin(phase) * 12, isAlt ? C.cyan : C.yellow);
-          circle(0, 0, 88, isAlt ? C.navy : C.red);
-          bigText('#' + (i + 1), 0, 4, 84, C.white, 0, 1);
+          K.xray(t);
         }}
+
+        // 2. Top Story Progress Bar across all cuts (y = 104)
+        ctx.fillStyle = 'rgba(255,255,255,0.18)';
+        rr(64, 104, 952, 12, 6);
+        ctx.fill();
+        const totalPct = clamp(t / Math.max(0.5, T.dur));
+        ctx.fillStyle = '#38BDF8';
+        rr(64, 104, Math.max(18, 952 * totalPct), 12, 6);
+        ctx.fill();
+
+        // 3. Animated Top Episodic Badge Pill (crisp clean typography, no smeared outline)
+        const slide = eo(seg(lt, 0.0, 0.28));
+        const bx = lerp(-240, 82, slide);
+        ctx.save();
+        ctx.translate(bx, 198);
+        ctx.fillStyle = isLast ? '#FACC15' : '#0F172A';
+        ctx.strokeStyle = isLast ? '#0F172A' : '#38BDF8';
+        ctx.lineWidth = 4;
+        rr(0, 0, 560, 68, 20);
+        ctx.fill();
+        ctx.stroke();
+
+        ctx.fillStyle = isLast ? '#0F172A' : '#FACC15';
+        ctx.font = '900 28px Inter';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('0' + (i + 1) + '  ·  ' + badge.toUpperCase(), 26, 35);
         ctx.restore();
 
-        // 3. Compact expressive presenter cleanly in right upper-mid safe zone (y = 660..1040)
+        // 4. Expressive mini host reaction in corner above caption safe zone
         K.man({{
-          x: 915,
-          y: 840,
-          s: 0.34,
-          xray: isAlt,
+          x: 910,
+          y: 895,
+          s: 0.28,
+          xray: false,
           arm: isLast ? K.ARM.wave : (isAlt ? K.ARM.point : K.ARM.hip),
-          mouth: Math.sin(lt * 11) > 0 ? 'o' : (isLast ? 'grin' : 'smile'),
+          mouth: Math.sin(lt * 12) > 0 ? 'o' : (isLast ? 'grin' : 'smile'),
           eyes: isLast ? 'wide' : 'n',
           brow: isLast ? 1 : 0
         }});
@@ -246,10 +400,10 @@ def generate_short(payload: dict) -> dict:
 
     (project_dir / "script.json").write_text(json.dumps(script_data, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    # 2b. Generate unique episodic SVG scenes per cut (unless caller passed custom shots_js)
+    # 2b. Fetch unique episodic photos per cut (unless caller passed custom shots_js)
     custom_shots_js = payload.get("shots_js")
     if not custom_shots_js:
-        _generate_episodic_svgs(topic, script_data.get("lines", []), project_dir)
+        _fetch_episodic_images(topic, script_data.get("lines", []), project_dir)
         shots_js_content = _build_default_shots_js(topic, script_data.get("lines", []))
     else:
         shots_js_content = custom_shots_js
@@ -290,7 +444,6 @@ def generate_short(payload: dict) -> dict:
         run_cmd([sys.executable, "tools/mix.py", "."], cwd=project_dir)
         logger.info(f"Rendering video to {mp4_path}...")
         run_cmd(["node", "tools/capture.mjs", "video", f"renders/{mp4_name}"], cwd=project_dir)
-        # Extract thumbnail directly via ffmpeg instead of spawning Chrome again
         thumb_path.parent.mkdir(parents=True, exist_ok=True)
         run_cmd(["ffmpeg", "-v", "error", "-y", "-ss", "2.0", "-i", str(mp4_path), "-frames:v", "1", "-q:v", "2", str(thumb_path)])
 
