@@ -30,8 +30,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium-driver \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+# Install Node.js 22
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
     && rm -rf /var/lib/apt/lists/*
 
@@ -56,8 +56,10 @@ EXPOSE 8080
 
 ENV PYTHONPATH=/app/src
 ENV PYTHONUNBUFFERED=1
+ENV CHROME=/usr/bin/chromium
 ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 ENV CHROME_PATH=/usr/bin/chromium
+ENV SOFTWARE_GL=1
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
     CMD curl -sf http://localhost:8080/ping || exit 1
