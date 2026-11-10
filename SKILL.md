@@ -1,6 +1,6 @@
 ---
 name: faceless-shorts
-description: Make narrated faceless YouTube Shorts / TikToks / Reels fully in code on the user's computer, with a free local neural AI voice (Kokoro-82M, human-like 21yo Hindi female hf_beta) and word-synced captions, $0. Follows a strict 3-step workflow: 1. Script First -> 2. Video Creation -> 3. Title, Description & Trending Hashtags (in English only). Six styles - Deep Dive 3D (Zack D. Films-like 3D explainers), Night File 3D (unsolved mysteries, true crime), Inside Out (flat 2D x-ray explainers), Stick Story (survival steps), Paper Atlas (history cut paper maps), Tall Tale 3D (funny true stories).
+description: Make narrated faceless YouTube Shorts / TikToks / Reels fully in code on the user's computer, with hyperrealistic neural AI voices (ElevenLabs Bella, Edge-TTS SwaraNeural, Kokoro-82M 21yo female) and word-synced captions. Follows a strict 3-step workflow: 1. Script First -> 2. Video Creation -> 3. Title, Description & Trending Hashtags (in English only). Six styles - Deep Dive 3D (Zack D. Films-like 3D explainers), Night File 3D (unsolved mysteries, true crime), Inside Out (flat 2D x-ray explainers), Stick Story (survival steps), Paper Atlas (history cut paper maps), Tall Tale 3D (funny true stories).
 ---
 
 # Faceless Shorts
@@ -30,7 +30,10 @@ Every time a video is requested, you MUST strictly follow this 3-phase order:
 ### Phase 1: Script & Plan First
 1. Write the conversational script before rendering any video:
    - **Narration Language**: Hindi (default) using natural conversational phrasing.
-   - **Voice**: 21-year-old female (`hf_beta`, Kokoro-82M).
+   - **Voice Options**:
+     - **ElevenLabs Multilingual v2**: `voice: "elevenlabs:EXAVITQu4vr4xnSDxMaL"` (Bella - hyperrealistic young 20s female, expressive). Requires `ELEVENLABS_API_KEY`.
+     - **Microsoft Azure Neural (Edge-TTS)**: `voice: "hi-IN-SwaraNeural"` (studio quality Hindi female, free, no key).
+     - **Kokoro-82M Local**: `voice: "hf_beta"` (21yo female, 100% offline local model).
    - **Pacing**: ~45-55 words for 20s; ~70-90 words for 30s; ~115-135 words for 45s.
    - **Structure**: Hook (0-4s) → Build Curiosity (4-10s) → Twist/Climax (10-16s) → Punchy Call to Action (16-20s).
    - **Cuts**: One line per cut (1.5 - 3.2 seconds each).
@@ -39,9 +42,9 @@ Every time a video is requested, you MUST strictly follow this 3-phase order:
 
 ### Phase 2: Video & Audio Creation
 1. Copy style files to project: `bash SKILL/scripts/new_video.sh <style> <short-name>`.
-2. Write `script.json` with the timed lines, `"voice": "hf_beta"`, and `"lang": "hi"`.
-3. **Voiceover**: Generate natural neural narration using Kokoro-82M Hindi female voice (`voice: "hf_beta"`, 21 years old).
-   - **VOICE QUALITY RULE**: Always use Kokoro neural voices for realistic human warmth, natural breaths, and 21yo female inflection. **Never use robotic legacy SAPI5 voices.**
+2. Write `script.json` with the timed lines, `"voice": "elevenlabs:EXAVITQu4vr4xnSDxMaL"` (or `"hi-IN-SwaraNeural"` / `"hf_beta"`), and `"lang": "hi"`.
+3. **Voiceover**: Generate natural neural narration using ElevenLabs (`voice: "elevenlabs:EXAVITQu4vr4xnSDxMaL"`), Edge-TTS (`hi-IN-SwaraNeural`), or Kokoro-82M (`hf_beta`).
+   - **VOICE QUALITY RULE**: Always use hyperrealistic neural voices for human warmth, natural breaths, and 21yo female inflection. **Never use robotic legacy SAPI5 voices.**
 4. Timing & Alignment: Generate `lines.json`, `data/narration.wav`, and `words.json`.
 5. Animate `src/shots.js`:
    - Quick cuts every 2–3 seconds.
