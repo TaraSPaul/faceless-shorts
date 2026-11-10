@@ -110,6 +110,14 @@ def main():
     voice = a.voice or S.get('voice', 'hi-IN-SwaraNeural'); speed = a.speed or S.get('speed', 1.0)
     engine = S.get('engine', 'edge' if voice.endswith('Neural') else ('elevenlabs' if voice.startswith('elevenlabs:') else 'kokoro'))
     el_key = os.environ.get('ELEVENLABS_API_KEY')
+    if not el_key:
+        for env_path in [Path.home() / '.gemini/config/skills/faceless-shorts/.env', P / '.env', Path.cwd() / '.env']:
+            if env_path.exists():
+                for eline in env_path.read_text(encoding='utf-8').splitlines():
+                    if eline.startswith('ELEVENLABS_API_KEY='):
+                        el_key = eline.split('=', 1)[1].strip()
+                        break
+            if el_key: break
 
     if engine == 'elevenlabs' or voice.startswith('elevenlabs:'):
         if not el_key:
