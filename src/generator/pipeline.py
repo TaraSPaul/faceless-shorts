@@ -18,6 +18,101 @@ STYLES_DIR = BASE_DIR / "styles"
 SCRIPTS_DIR = BASE_DIR / "scripts"
 WORKSPACE_DIR = Path(os.environ.get("SHORTS_WORKSPACE", "/tmp/shorts" if os.name != 'nt' else "C:/tmp/shorts"))
 
+def _build_default_shots_js(topic: str, lines: list) -> str:
+    """Generate a safe-zone compliant shots.js for any set of narration lines."""
+    badges = []
+    for i, ln in enumerate(lines):
+        caps = (ln.get("caps") or "").replace("*", "").split("|")[0].strip()
+        label = (caps or topic)[:22].replace("'", "\\'").replace('"', '\\"')
+        badges.append(label)
+
+    badges_js = json.dumps(badges, ensure_ascii=False)
+    topic_esc = topic[:28].replace('"', '\\"')
+
+    return f"""// Auto-generated safe-zone compliant shots.js
+import {{ ctx, C, W, H, clamp, lerp, seg, eo, eio, eob, rnd, bigText, rr, circle, line }} from './core/lib.js';
+import {{ L, Le, T }} from './core/timing.js';
+import * as K from './core/kit.js';
+
+const BADGES = {badges_js};
+
+export function buildShots() {{
+  const S = [], CUES = [];
+  const add = (o) => (S.push(o), o);
+  const cue = (t, type, o = {{}}) => CUES.push({{ t: +t.toFixed(3), type, ...o }});
+  const cut = (i) => (i === 0 ? 0 : L(i) - 0.08);
+
+  const count = T.lines.length;
+  for (let i = 0; i < count; i++) {{
+    const st = cut(i);
+    const badge = BADGES[i] || "{topic_esc}";
+    const isAlt = i % 2 === 1;
+    const isLast = i === count - 1;
+
+    add({{
+      id: 'S' + String(i + 1).padStart(2, '0'),
+      at: st,
+      cam: [540, 720],
+      zoom: 0.02 * (i % 3),
+      note: 'Auto scene ' + i,
+      draw(lt, d, t) {{
+        if (isAlt) {{
+          K.xray(t);
+        }} else {{
+          K.room();
+        }}
+
+        // Safe-zone animated centerpiece (y = 280..520)
+        const pop = eob(seg(lt, 0.05, 0.35));
+        const bob = Math.sin(lt * 2.5 + i) * 10;
+
+        ctx.save();
+        ctx.translate(540, 390 + bob);
+        ctx.scale(pop, pop);
+
+        // Glowing badge card
+        ctx.fillStyle = isAlt ? C.navy : C.white;
+        ctx.strokeStyle = isAlt ? C.cyan : C.ink;
+        ctx.lineWidth = 8;
+        rr(-340, -110, 680, 220, 34);
+        ctx.fill();
+        ctx.stroke();
+
+        // Decorative accent circle
+        circle(-265, -48, 34, isLast ? C.yellow : (isAlt ? C.cyan : C.red));
+        ctx.fillStyle = isAlt ? C.white : C.ink;
+        ctx.font = '900 36px Inter';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(i + 1), -265, -46);
+
+        // Headline label inside safe card
+        bigText(badge.toUpperCase(), 20, 12, 42, isAlt ? C.yellow : C.navy, 0, 1);
+        ctx.restore();
+
+        // Explainer character anchored cleanly above caption zone (y = 510..1060)
+        K.man({{
+          x: 540,
+          y: 750,
+          s: 0.52,
+          xray: isAlt,
+          arm: isAlt ? K.ARM.wave : K.ARM.point,
+          mouth: Math.sin(lt * 10) > 0 ? 'o' : 'smile',
+          eyes: isLast ? 'wide' : 'n',
+          brow: isLast ? 1 : 0
+        }});
+      }}
+    }});
+
+    cue(st, i === 0 ? 'pop' : 'whoosh', {{ gain: 0.55 }});
+    if (isLast) cue(st + 0.25, 'sparkle', {{ gain: 0.65 }});
+  }}
+
+  return {{ shots: S, cues: CUES }};
+}}
+"""
+
+
 def run_cmd(cmd, cwd=None):
     logger.info(f"Running: {' '.join(str(c) for c in cmd)} (cwd={cwd})")
     res = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True)
@@ -78,6 +173,10 @@ def generate_short(payload: dict) -> dict:
         script_data["engine"] = "elevenlabs" if voice.startswith("elevenlabs:") else ("edge" if voice.endswith("Neural") else "kokoro")
 
     (project_dir / "script.json").write_text(json.dumps(script_data, indent=1, ensure_ascii=False), encoding="utf-8")
+
+    # 2b. Write shots.js (custom or auto-generated safe-zone scenes)
+    shots_js_content = payload.get("shots_js") or _build_default_shots_js(topic, script_data.get("lines", []))
+    (project_dir / "src/shots.js").write_text(shots_js_content, encoding="utf-8")
 
     # 3. Synthesize voice
     logger.info(f"Synthesizing voice ({voice})...")
