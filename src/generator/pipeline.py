@@ -1,6 +1,7 @@
 """
 generator/pipeline.py — Video generation pipeline orchestrator.
 """
+import base64
 from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
@@ -21,6 +22,95 @@ STYLES_DIR = BASE_DIR / "styles"
 SCRIPTS_DIR = BASE_DIR / "scripts"
 WORKSPACE_DIR = Path(os.environ.get("SHORTS_WORKSPACE", "/tmp/shorts" if os.name != 'nt' else "C:/tmp/shorts"))
 SCENE_MODEL_ID = os.environ.get("SCENE_MODEL_ID", "us.amazon.nova-pro-v1:0")
+
+
+def _build_image_prompts(topic: str, lines: list) -> list[str]:
+    """Use Amazon Bedrock to craft distinct cinematic image prompts tailored to each spoken cut."""
+    cuts_summary = "\n".join(
+        f"Cut {i}: {ln.get('text', '')!r}"
+        for i, ln in enumerate(lines)
+    )
+    prompt = f"""Write {len(lines)} vivid, distinct visual image generation prompts (one per cut) for a vertical explainer video about:
+"{topic}"
+
+Spoken script cuts:
+{cuts_summary}
+
+Rules:
+1. Every prompt must describe a crisp, 3D Pixar/documentary-style visual scene illustrating THAT exact spoken cut.
+2. Always include "vibrant 3D cinematic illustration, high detail, studio lighting, no text, no words, no watermark".
+3. Return ONLY a JSON array of {len(lines)} prompt strings (no markdown fences)."""
+
+    try:
+        br = boto3.client("bedrock-runtime", region_name=config.AWS_REGION)
+        resp = br.converse(
+            modelId=SCENE_MODEL_ID,
+            messages=[{"role": "user", "content": [{"text": prompt}]}],
+            inferenceConfig={"maxTokens": 1200, "temperature": 0.6},
+        )
+        raw = resp["output"]["message"]["content"][0]["text"].strip()
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw).strip()
+        m = re.search(r"\[.*\]", raw, re.DOTALL)
+        if m:
+            raw = m.group(0)
+        parsed = json.loads(raw)
+        if isinstance(parsed, list) and parsed:
+            out = [str(p).strip() for p in parsed[:len(lines)]]
+            while len(out) < len(lines):
+                out.append(f"Vibrant 3D cinematic illustration about {topic}, high detail, studio lighting, no text")
+            return out
+    except Exception as exc:
+        logger.warning(f"Bedrock image prompt planning failed ({exc}); using direct cut prompts.")
+
+    return [
+        f"Vibrant 3D cinematic educational illustration about {topic}, scene focusing on: {ln.get('caps', '').replace('*', '')}, crisp studio lighting, no text"
+        for ln in lines
+    ]
+
+
+def _generate_gemini_images(topic: str, lines: list, project_dir: Path, api_key: str) -> int:
+    """Generate distinct episodic AI images per cut using Google Gemini Image API."""
+    if not api_key or not lines:
+        return 0
+
+    data_dir = project_dir / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    prompts = _build_image_prompts(topic, lines)
+    model = config.GEMINI_IMAGE_MODEL
+    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key={api_key}"
+
+    def gen_one(item):
+        idx, p = item
+        try:
+            r = requests.post(
+                endpoint,
+                json={
+                    "contents": [{"parts": [{"text": p}]}],
+                    "generationConfig": {"responseModalities": ["IMAGE"]},
+                },
+                timeout=35,
+            )
+            if r.status_code != 200:
+                logger.warning(f"Gemini image cut {idx} returned {r.status_code}: {r.text[:180]}")
+                return False
+            data = r.json()
+            for part in data.get("candidates", [{}])[0].get("content", {}).get("parts", []):
+                if "inlineData" in part:
+                    raw_bytes = base64.b64decode(part["inlineData"]["data"])
+                    mime = part["inlineData"].get("mimeType", "")
+                    ext = "png" if "png" in mime.lower() else "jpg"
+                    (data_dir / f"bg_{idx}.{ext}").write_bytes(raw_bytes)
+                    return True
+        except Exception as exc:
+            logger.warning(f"Gemini image cut {idx} exception: {exc}")
+        return False
+
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        results = list(ex.map(gen_one, enumerate(prompts)))
+
+    ok_count = sum(1 for ok in results if ok)
+    logger.info(f"Generated {ok_count}/{len(lines)} episodic AI images via Gemini ({model}).")
+    return ok_count
 
 
 def _generate_cut_queries(topic: str, lines: list) -> list[str]:
@@ -403,11 +493,15 @@ def generate_short(payload: dict) -> dict:
 
     (project_dir / "script.json").write_text(json.dumps(script_data, indent=1, ensure_ascii=False), encoding="utf-8")
 
-    # 2b. Fetch unique episodic photos per cut (unless caller passed custom shots_js)
+    # 2b. Generate unique episodic AI images via Gemini (falling back to Wikipedia only if unavailable/quota exhausted)
     custom_shots_js = payload.get("shots_js")
     if not custom_shots_js:
-        _fetch_episodic_images(topic, script_data.get("lines", []), project_dir)
-        shots_js_content = _build_default_shots_js(topic, script_data.get("lines", []))
+        lines = script_data.get("lines", [])
+        google_key = (payload.get("google_api_key") or config.GOOGLE_API_KEY or "").strip()
+        gem_count = _generate_gemini_images(topic, lines, project_dir, google_key) if google_key else 0
+        if gem_count == 0:
+            _fetch_episodic_images(topic, lines, project_dir)
+        shots_js_content = _build_default_shots_js(topic, lines)
     else:
         shots_js_content = custom_shots_js
     (project_dir / "src/shots.js").write_text(shots_js_content, encoding="utf-8")
